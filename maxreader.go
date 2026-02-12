@@ -10,6 +10,7 @@ import (
 // ErrBodyTooLarge 是当读取的字节数超过 MaxBytesReader 设置的限制时返回的错误.
 // 将其定义为可导出的变量, 方便调用方使用 errors.Is 进行判断.
 var ErrBodyTooLarge = fmt.Errorf("body too large")
+var IsNolimit = fmt.Errorf("no limit")
 
 // maxBytesReader 是一个实现了 io.ReadCloser 接口的结构体.
 // 它包装了另一个 io.ReadCloser, 并限制了从其中读取的最大字节数.
@@ -27,18 +28,19 @@ type maxBytesReader struct {
 //
 // 如果 r 为 nil, 会 panic.
 // 如果 n 小于 0, 则读取不受限制, 直接返回原始的 r.
-func NewMaxBytesReader(r io.ReadCloser, n int64) io.ReadCloser {
+func NewMaxBytesReader(r io.ReadCloser, n int64) (io.ReadCloser, error) {
 	if r == nil {
 		panic("NewMaxBytesReader called with a nil reader")
 	}
 	// 如果限制为负数, 意味着不限制, 直接返回原始的 ReadCloser.
-	if n < 0 {
-		return r
+	if n <= 0 {
+		return r, IsNolimit
 	}
+
 	return &maxBytesReader{
 		r: r,
 		n: n,
-	}
+	}, nil
 }
 
 // Read 方法从底层的 ReadCloser 读取数据, 同时检查是否超过了字节限制.
@@ -47,7 +49,7 @@ func (mbr *maxBytesReader) Read(p []byte) (int, error) {
 	readSoFar := mbr.read.Load()
 
 	// 快速失败路径: 如果在读取之前就已经达到了限制, 立即返回错误.
-	if readSoFar >= mbr.n {
+	if readSoFar >= mbr.n && mbr.n > 0 {
 		return 0, ErrBodyTooLarge
 	}
 

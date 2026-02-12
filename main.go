@@ -19,7 +19,7 @@ import (
 	"github.com/go-json-experiment/json"
 	"github.com/go-json-experiment/json/jsontext"
 
-	"github.com/WJQSERVER-STUDIO/go-utils/copyb"
+	"github.com/WJQSERVER-STUDIO/go-utils/iox"
 	"github.com/WJQSERVER-STUDIO/httpc"
 	"github.com/mattn/go-isatty"
 	"github.com/schollz/progressbar/v3"
@@ -337,6 +337,25 @@ func handleHTTPRequest(cmd *Command, args []string) {
 	}
 }
 
+// getFileNameFromURL 从 URL 中安全地解析出文件名。
+func getFileNameFromURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	// 使用 filepath.Base 来获取路径的最后一段
+	fileName := filepath.Base(u.Path)
+
+	// 简单的有效性检查：确保文件名不是空的，且至少包含一个点 (暗示是文件，而不是目录)
+	if fileName == "." || fileName == "/" || !strings.Contains(fileName, ".") {
+		// 对于 https://example.com/data/ 或 https://example.com/data，它将返回 "data" 或 "."，这不适合作为文件名
+		return "", fmt.Errorf("could not derive a valid filename from URL path")
+	}
+
+	return fileName, nil
+}
+
 func handleDownload(cmd *Command, args []string) {
 	cmd.fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: hurl download <url> -o <output_file> [flags]\n\nFlags for download:")
@@ -348,12 +367,21 @@ func handleDownload(cmd *Command, args []string) {
 		cmd.fs.Usage()
 		os.Exit(1)
 	}
-	if outputPath == "" {
-		fmt.Fprintf(os.Stderr, "%sError: -o flag for output file is required.%s\n", colors.Red, colors.Reset)
-		cmd.fs.Usage()
-		os.Exit(1)
-	}
+
 	url := args[0]
+
+	if outputPath == "" {
+		fileName, err := getFileNameFromURL(url)
+		if err != nil {
+			// 如果无法解析文件名，则强制要求 -o
+			fmt.Fprintf(os.Stderr, "%sError: %v. The -o flag for output file is required if the URL does not contain a clear filename.%s\n", colors.Red, err, colors.Reset)
+			cmd.fs.Usage()
+			os.Exit(1)
+		}
+		// 设置输出路径为当前目录下的解析文件名
+		outputPath = fileName
+	}
+
 	client, err := buildClientFromFlags()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sError building client: %v%s\n", colors.Red, err, colors.Reset)
@@ -377,15 +405,30 @@ func handleDownload(cmd *Command, args []string) {
 		os.Exit(1)
 	}
 	defer file.Close()
-	total, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+	//total, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+	total := int64(-1)
+	// 尝试获取 Content-Length
+	if clStr := resp.Header.Get("Content-Length"); clStr != "" {
+		if val, err := strconv.ParseInt(clStr, 10, 64); err == nil {
+			total = val
+		}
+	}
 	bar := progressbar.NewOptions64(total, progressbar.OptionSetDescription("Downloading"), progressbar.OptionSetWriter(os.Stderr), progressbar.OptionShowBytes(true), progressbar.OptionThrottle(65*time.Millisecond), progressbar.OptionOnCompletion(func() { fmt.Fprint(os.Stderr, "\n") }))
 	maxBytes, err := parseSize(maxSizeStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sError parsing max-size: %v%s\n", colors.Red, err, colors.Reset)
 		os.Exit(1)
 	}
-	reader := NewMaxBytesReader(resp.Body, maxBytes)
-	_, err = copyb.Copy(io.MultiWriter(file, bar), reader)
+	var reader io.ReadCloser
+	reader, err = NewMaxBytesReader(resp.Body, maxBytes)
+	if err != nil {
+		if err == IsNolimit {
+		} else {
+			fmt.Fprintf(os.Stderr, "%sError creating max-bytes reader: %v%s\n", colors.Red, err, colors.Reset)
+			os.Exit(1)
+		}
+	}
+	_, err = iox.Copy(io.MultiWriter(file, bar), reader)
 	if err != nil {
 		if err == ErrBodyTooLarge {
 			fmt.Fprintf(os.Stderr, "\n%sError: %v (limit: %s)%s\n", colors.Red, err, maxSizeStr, colors.Reset)
@@ -424,7 +467,7 @@ func handleUpload(cmd *Command, args []string) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	part, _ := writer.CreateFormFile(fieldName, filepath.Base(filePath))
-	copyb.Copy(part, file)
+	iox.Copy(part, file)
 	for _, f := range formFields {
 		key, val, _ := strings.Cut(f, "=")
 		writer.WriteField(key, val)
@@ -464,7 +507,14 @@ func processAndPrintResponse(resp *http.Response) error {
 		return err
 	}
 
-	limitedBody := NewMaxBytesReader(resp.Body, maxBytes)
+	limitedBody, err := NewMaxBytesReader(resp.Body, maxBytes)
+	if err != nil {
+		if err == IsNolimit {
+			limitedBody = resp.Body
+		} else {
+			return err
+		}
+	}
 	defer limitedBody.Close()
 
 	if includeHeaders || resp.Request.Method == http.MethodHead {
@@ -489,7 +539,7 @@ func processAndPrintResponse(resp *http.Response) error {
 		return nil
 	}
 
-	body, err := copyb.ReadAll(limitedBody)
+	body, err := iox.ReadAll(limitedBody)
 	if err != nil {
 		if err == ErrBodyTooLarge {
 			if isDefaultLimit {
