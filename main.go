@@ -255,7 +255,7 @@ func applyRequestFlags(rb *httpc.RequestBuilder) error {
 		rb.SetRawBody([]byte(rawData))
 	}
 	if len(jsonFields) > 0 {
-		body := make(map[string]interface{})
+		body := make(map[string]any)
 		for _, field := range jsonFields {
 			key, val, _ := strings.Cut(field, "=")
 			body[key] = autotype(val)
@@ -360,7 +360,10 @@ func handleDownload(cmd *Command, args []string) {
 		os.Exit(1)
 	}
 	rb := client.GET(url)
-	applyRequestFlags(rb)
+	if err := applyRequestFlags(rb); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError applying request flags: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	resp, err := rb.Execute()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sError starting download: %v%s\n", colors.Red, err, colors.Reset)
@@ -377,7 +380,16 @@ func handleDownload(cmd *Command, args []string) {
 		os.Exit(1)
 	}
 	defer file.Close()
-	total, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+	contentLength := resp.Header.Get("Content-Length")
+	var total int64
+	if contentLength != "" {
+		var err error
+		total, err = strconv.ParseInt(contentLength, 10, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%sWarning: invalid Content-Length %q: %v%s\n", colors.Yellow, contentLength, err, colors.Reset)
+			total = 0
+		}
+	}
 	bar := progressbar.NewOptions64(total, progressbar.OptionSetDescription("Downloading"), progressbar.OptionSetWriter(os.Stderr), progressbar.OptionShowBytes(true), progressbar.OptionThrottle(65*time.Millisecond), progressbar.OptionOnCompletion(func() { fmt.Fprint(os.Stderr, "\n") }))
 	maxBytes, err := parseSize(maxSizeStr)
 	if err != nil {
@@ -423,13 +435,26 @@ func handleUpload(cmd *Command, args []string) {
 	defer file.Close()
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	part, _ := writer.CreateFormFile(fieldName, filepath.Base(filePath))
-	copyb.Copy(part, file)
+	part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sError creating form file: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
+	if _, err := copyb.Copy(part, file); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError copying file content: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	for _, f := range formFields {
 		key, val, _ := strings.Cut(f, "=")
-		writer.WriteField(key, val)
+		if err := writer.WriteField(key, val); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError writing form field: %v%s\n", colors.Red, err, colors.Reset)
+			os.Exit(1)
+		}
 	}
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError closing multipart writer: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	client, err := buildClientFromFlags()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sError building client: %v%s\n", colors.Red, err, colors.Reset)
@@ -437,7 +462,10 @@ func handleUpload(cmd *Command, args []string) {
 	}
 	rb := client.POST(url).SetBody(body)
 	rb.SetHeader("Content-Type", writer.FormDataContentType())
-	applyRequestFlags(rb)
+	if err := applyRequestFlags(rb); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError applying request flags: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	resp, err := rb.Execute()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sError executing request: %v%s\n", colors.Red, err, colors.Reset)
@@ -502,9 +530,13 @@ func processAndPrintResponse(resp *http.Response) error {
 
 	if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
 		var v any
-		if err := json.Unmarshal(body, &v); err == nil {
+		if err := json.Unmarshal(body, &v); err != nil {
+			fmt.Fprintf(os.Stderr, "%sWarning: failed to parse JSON response: %v%s\n", colors.Yellow, err, colors.Reset)
+		} else {
 			prettyJSON, err := json.Marshal(v, jsontext.Multiline(true), jsontext.WithIndent("  "))
-			if err == nil {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%sWarning: failed to format JSON: %v%s\n", colors.Yellow, err, colors.Reset)
+			} else {
 				fmt.Println(string(prettyJSON))
 				return nil
 			}
@@ -514,7 +546,7 @@ func processAndPrintResponse(resp *http.Response) error {
 	return nil
 }
 
-func autotype(val string) interface{} {
+func autotype(val string) any {
 	if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 		return i
 	}
