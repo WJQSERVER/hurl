@@ -420,6 +420,9 @@ func handleDownload(cmd *Command, args []string) {
 	if clStr := resp.Header.Get("Content-Length"); clStr != "" {
 		if val, err := strconv.ParseInt(clStr, 10, 64); err == nil {
 			total = val
+		} else {
+			fmt.Fprintf(os.Stderr, "%sWarning: invalid Content-Length %q: %v%s\n", colors.Yellow, clStr, err, colors.Reset)
+			total = 0
 		}
 	}
 	bar := progressbar.NewOptions64(total, progressbar.OptionSetDescription("Downloading"), progressbar.OptionSetWriter(os.Stderr), progressbar.OptionShowBytes(true), progressbar.OptionThrottle(65*time.Millisecond), progressbar.OptionOnCompletion(func() { fmt.Fprint(os.Stderr, "\n") }))
