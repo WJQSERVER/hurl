@@ -30,7 +30,7 @@ type maxBytesReader struct {
 // 如果 n 小于 0, 则读取不受限制, 直接返回原始的 r.
 func NewMaxBytesReader(r io.ReadCloser, n int64) (io.ReadCloser, error) {
 	if r == nil {
-		panic("NewMaxBytesReader called with a nil reader")
+		return nil, fmt.Errorf("reader cannot be nil")
 	}
 	// 如果限制为负数, 意味着不限制, 直接返回原始的 ReadCloser.
 	if n <= 0 {

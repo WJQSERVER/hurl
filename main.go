@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -61,7 +62,7 @@ func init() {
 }
 
 func registerCommand(cmd *Command) {
-	cmd.fs = flag.NewFlagSet(cmd.Name, flag.ExitOnError)
+	cmd.fs = flag.NewFlagSet(cmd.Name, flag.ContinueOnError)
 	addCommonFlags(cmd.fs)
 	switch cmd.Name {
 	case "download":
@@ -115,10 +116,13 @@ func init() {
 }
 
 func main() {
-	fs := flag.NewFlagSet("hurl", flag.ExitOnError)
+	fs := flag.NewFlagSet("hurl", flag.ContinueOnError)
 	addCommonFlags(fs)
 	fs.StringVar(&method, "X", "", "HTTP method to use (e.g., GET, POST).")
-	fs.Parse(os.Args[1:])
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError parsing flags: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	args := fs.Args()
 
 	if len(os.Args) < 2 || os.Args[1] == "help" || os.Args[1] == "--help" || os.Args[1] == "-h" {
@@ -134,7 +138,10 @@ func main() {
 
 	cmd := findCommand(os.Args[1])
 	if cmd != nil {
-		cmd.fs.Parse(os.Args[2:])
+		if err := cmd.fs.Parse(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError parsing command flags: %v%s\n", colors.Red, err, colors.Reset)
+			os.Exit(1)
+		}
 		cmd.Run(cmd, cmd.fs.Args())
 	} else {
 		if len(args) == 0 {
@@ -388,7 +395,10 @@ func handleDownload(cmd *Command, args []string) {
 		os.Exit(1)
 	}
 	rb := client.GET(url)
-	applyRequestFlags(rb)
+	if err := applyRequestFlags(rb); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError applying request flags: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	resp, err := rb.Execute()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sError starting download: %v%s\n", colors.Red, err, colors.Reset)
@@ -405,7 +415,6 @@ func handleDownload(cmd *Command, args []string) {
 		os.Exit(1)
 	}
 	defer file.Close()
-	//total, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
 	total := int64(-1)
 	// 尝试获取 Content-Length
 	if clStr := resp.Header.Get("Content-Length"); clStr != "" {
@@ -421,16 +430,13 @@ func handleDownload(cmd *Command, args []string) {
 	}
 	var reader io.ReadCloser
 	reader, err = NewMaxBytesReader(resp.Body, maxBytes)
-	if err != nil {
-		if err == IsNolimit {
-		} else {
-			fmt.Fprintf(os.Stderr, "%sError creating max-bytes reader: %v%s\n", colors.Red, err, colors.Reset)
-			os.Exit(1)
-		}
+	if err != nil && !errors.Is(err, IsNolimit) {
+		fmt.Fprintf(os.Stderr, "%sError creating max-bytes reader: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
 	}
 	_, err = iox.Copy(io.MultiWriter(file, bar), reader)
 	if err != nil {
-		if err == ErrBodyTooLarge {
+		if errors.Is(err, ErrBodyTooLarge) {
 			fmt.Fprintf(os.Stderr, "\n%sError: %v (limit: %s)%s\n", colors.Red, err, maxSizeStr, colors.Reset)
 			os.Exit(1)
 		}
@@ -466,13 +472,26 @@ func handleUpload(cmd *Command, args []string) {
 	defer file.Close()
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	part, _ := writer.CreateFormFile(fieldName, filepath.Base(filePath))
-	iox.Copy(part, file)
+	part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sError creating form file: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
+	if _, err := iox.Copy(part, file); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError copying file content: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	for _, f := range formFields {
 		key, val, _ := strings.Cut(f, "=")
-		writer.WriteField(key, val)
+		if err := writer.WriteField(key, val); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError writing form field: %v%s\n", colors.Red, err, colors.Reset)
+			os.Exit(1)
+		}
 	}
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError closing multipart writer: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	client, err := buildClientFromFlags()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sError building client: %v%s\n", colors.Red, err, colors.Reset)
@@ -480,7 +499,10 @@ func handleUpload(cmd *Command, args []string) {
 	}
 	rb := client.POST(url).SetBody(body)
 	rb.SetHeader("Content-Type", writer.FormDataContentType())
-	applyRequestFlags(rb)
+	if err := applyRequestFlags(rb); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError applying request flags: %v%s\n", colors.Red, err, colors.Reset)
+		os.Exit(1)
+	}
 	resp, err := rb.Execute()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sError executing request: %v%s\n", colors.Red, err, colors.Reset)
@@ -509,7 +531,7 @@ func processAndPrintResponse(resp *http.Response) error {
 
 	limitedBody, err := NewMaxBytesReader(resp.Body, maxBytes)
 	if err != nil {
-		if err == IsNolimit {
+		if errors.Is(err, IsNolimit) {
 			limitedBody = resp.Body
 		} else {
 			return err
@@ -541,7 +563,7 @@ func processAndPrintResponse(resp *http.Response) error {
 
 	body, err := iox.ReadAll(limitedBody)
 	if err != nil {
-		if err == ErrBodyTooLarge {
+		if errors.Is(err, ErrBodyTooLarge) {
 			if isDefaultLimit {
 				return fmt.Errorf("%w (default terminal limit: %s). Use --max-size to override.", err, defaultTerminalMaxSize)
 			}
@@ -552,9 +574,13 @@ func processAndPrintResponse(resp *http.Response) error {
 
 	if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
 		var v any
-		if err := json.Unmarshal(body, &v); err == nil {
+		if err := json.Unmarshal(body, &v); err != nil {
+			fmt.Fprintf(os.Stderr, "%sWarning: failed to parse JSON: %v%s\n", colors.Yellow, err, colors.Reset)
+		} else {
 			prettyJSON, err := json.Marshal(v, jsontext.Multiline(true), jsontext.WithIndent("  "))
-			if err == nil {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%sWarning: failed to format JSON: %v%s\n", colors.Yellow, err, colors.Reset)
+			} else {
 				fmt.Println(string(prettyJSON))
 				return nil
 			}
