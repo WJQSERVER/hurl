@@ -255,7 +255,7 @@ func applyRequestFlags(rb *httpc.RequestBuilder) error {
 		rb.SetRawBody([]byte(rawData))
 	}
 	if len(jsonFields) > 0 {
-		body := make(map[string]interface{})
+		body := make(map[string]any)
 		for _, field := range jsonFields {
 			key, val, _ := strings.Cut(field, "=")
 			body[key] = autotype(val)
@@ -564,7 +564,7 @@ func processAndPrintResponse(resp *http.Response) error {
 	return nil
 }
 
-func autotype(val string) interface{} {
+func autotype(val string) any {
 	if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 		return i
 	}
